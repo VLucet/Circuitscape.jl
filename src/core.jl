@@ -218,7 +218,9 @@ function amg_solver_path(data::GraphData{T,V}, flags, cfg, log)::Matrix{T} where
             f(1)
             update_shortcut_resistances!(idx, shortcut, resistances, points, comp)
         else
-            X = pmap(x ->f(x), 1:size(csub,1))
+            # Changed pmap to map to allow use on cluster with paralel process
+            # This is a temporary fix for our use case
+            X = map(x ->f(x), 1:size(csub,1))
 
             # Set all resistances
             for x in X
