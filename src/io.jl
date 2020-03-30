@@ -1,4 +1,4 @@
-abstract type Data end 
+abstract type Data end
 
 struct IncludeExcludePairs{V}
     mode::Symbol
@@ -24,9 +24,11 @@ struct RasterMeta
     cellsize::Float64
     nodata::Float64
     file_type::Int
+    crs::String
+    affine_map::AffineMap
 end
 function RasterMeta()
-    RasterMeta(0,0,0,0,0,0,0)
+    RasterMeta(0,0,0,0,0,0,0,"",AffineMap([0 0; 0 0], [0, 0]))
 end
 
 struct RasData{T,V} <: Data
@@ -65,7 +67,11 @@ end
 
 function read_cellmap(habitat_file::String, is_res::Bool, ::Type{T}) where {T}
 
-    cell_map, rastermeta = _ascii_grid_reader(T, habitat_file)
+    if is_geotiff(habitat_file)
+        cell_map, rastermeta = read_geotiff(T, habitat_file)
+    else
+        cell_map, rastermeta = _ascii_grid_reader(T, habitat_file)
+    end
 
     gmap = similar(cell_map)
     ind = findall(x -> x == -9999, cell_map)
@@ -97,15 +103,16 @@ function _ascii_grid_reader(T, file)
         c = readdlm(f, T; skipstart = ss)
     catch
         seek(f, 0)
-        try 
+        try
             d = readdlm(f; skipstart = ss)
             d = d[:, 1:end-1]
             c = map(T, d)
-        catch 
-            error("Failed to read habitat map. There may be errors in your file.") 
+        catch
+            error("Failed to read habitat map. There may be errors in your file.")
         end
     end
     map!(x -> x == rastermeta.nodata ? -9999. : x , c, c)
+    close(f)
     c, rastermeta
 end
 
@@ -122,7 +129,7 @@ function _ascii_grid_read_header(habitat_file, f)
         nodata = parse(Float64, s[2])
     end
     seek(f, 0)
-    RasterMeta(ncols, nrows, xllcorner, yllcorner, cellsize, nodata, file_type)
+    RasterMeta(ncols, nrows, xllcorner, yllcorner, cellsize, nodata, file_type ,"", AffineMap([0 0; 0 0], [0, 0]))
 end
 
 #=function _guess_file_type(filename, f)
@@ -143,21 +150,43 @@ end
 
 end=#
 
+function is_geotiff(filename)
+    endswith(filename,"tif") | endswith(filename,"tiff")
+end
+
+function read_geotiff(T, f)
+    gt=GeoArrays.read(f)
+    ncols = size(gt,1)
+    nrows = size(gt,2)
+    xll = gt.f.translation[1]
+    yll= gt.f.translation[2]-gt.f.linear[1,1]-(gt.f.linear[1,1]*(size(gt,2)-1))
+    cellsize = gt.f.linear[1,1]
+    crs = gt.crs
+    affine_map = gt.f
+    file_type = FILE_TYPE_GEOTIFF
+    nodata = -Inf
+    Array{T}(permutedims(gt.A[:,:,1])), RasterMeta(ncols, nrows, xll, yll, cellsize, nodata, file_type,crs, affine_map)
+end
+
 function _guess_file_type(filename, f)
 
-    hdr = readline(f)
-    seek(f, 0)
-
-    if startswith(hdr, FILE_HDR_NPY)
-        filetype = FILE_TYPE_NPY
-    elseif startswith(lowercase(hdr), FILE_HDR_AAGRID)
-        filetype = FILE_TYPE_AAGRID
-    elseif startswith(hdr, FILE_HDR_INCL_PAIRS_AAGRID)
-        filetype = FILE_TYPE_INCL_PAIRS_AAGRID
-    elseif startswith(hdr, FILE_HDR_INCL_PAIRS)
-        filetype = FILE_TYPE_INCL_PAIRS
+    if is_geotiff(filename)
+        filetype = FILE_TYPE_GEOTIFF
     else
-        filetype = FILE_TYPE_TXTLIST
+        hdr = readline(f)
+        seek(f, 0)
+
+        if startswith(hdr, FILE_HDR_NPY)
+            filetype = FILE_TYPE_NPY
+        elseif startswith(lowercase(hdr), FILE_HDR_AAGRID)
+            filetype = FILE_TYPE_AAGRID
+        elseif startswith(hdr, FILE_HDR_INCL_PAIRS_AAGRID)
+            filetype = FILE_TYPE_INCL_PAIRS_AAGRID
+        elseif startswith(hdr, FILE_HDR_INCL_PAIRS)
+            filetype = FILE_TYPE_INCL_PAIRS
+        else
+            filetype = FILE_TYPE_TXTLIST
+        end
     end
 
     return filetype
@@ -166,23 +195,43 @@ end
 function read_polymap(T, file::String, habitatmeta;
                             nodata_as = 0, resample = true)
 
-    polymap, rastermeta = _ascii_grid_reader(T, file)
+    if is_geotiff(file)
+        polymap, rastermeta = read_geotiff(T, file)
+    else
+        polymap, rastermeta = _ascii_grid_reader(T, file)
+    end
 
     ind = findall(x -> x == rastermeta.nodata, polymap)
     if nodata_as != -1
         polymap[ind] .= nodata_as
     end
 
-    if rastermeta.cellsize != habitatmeta.cellsize
-        cswarn("cellsize is not the same")
-    elseif rastermeta.ncols != habitatmeta.ncols
-        cswarn("ncols is not the same")
-    elseif rastermeta.nrows != habitatmeta.nrows
-        cswarn("nrows is not the same")
-    elseif rastermeta.yllcorner != habitatmeta.yllcorner
-        cswarn("yllcorner is not the same")
-    elseif rastermeta.xllcorner != habitatmeta.xllcorner
-        cswarn("xllcorner is not the same")
+    if(is_geotiff(file))
+        if rastermeta.yllcorner != habitatmeta.yllcorner
+            cswarn("yllcorner is not the same")
+        elseif rastermeta.xllcorner != habitatmeta.xllcorner
+            cswarn("xllcorner is not the same")
+        elseif rastermeta.ncols != habitatmeta.ncols
+            cswarn("ncols is not the same")
+        elseif rastermeta.nrows != habitatmeta.nrows
+            cswarn("nrows is not the same")
+        elseif rastermeta.cellsize != habitatmeta.cellsize
+            cswarn("cellsize is not the same")
+        elseif rastermeta.crs != habitatmeta.crs
+            cswarn("reference system is not the same")
+        end
+    else
+        if rastermeta.cellsize != habitatmeta.cellsize
+            cswarn("cellsize is not the same")
+        elseif rastermeta.ncols != habitatmeta.ncols
+            cswarn("ncols is not the same")
+        elseif rastermeta.nrows != habitatmeta.nrows
+            cswarn("nrows is not the same")
+        elseif rastermeta.yllcorner != habitatmeta.yllcorner
+            cswarn("yllcorner is not the same")
+        elseif rastermeta.xllcorner != habitatmeta.xllcorner
+            cswarn("xllcorner is not the same")
+        end
     end
 
     polymap
@@ -190,8 +239,8 @@ end
 
 function read_point_map(V, file, habitatmeta)
 
-    # Advanced mode 
-    if file == "none" 
+    # Advanced mode
+    if file == "none"
         return (V[], V[], V[])
     end
 
@@ -228,7 +277,7 @@ function read_point_map(V, file, habitatmeta)
     i = i[idx]
     j = j[idx]
     v = v[idx]
-    
+
     if (minimum(i) < 0) || (minimum(j) < 0) ||
             (maximum(i) > (habitatmeta.nrows)) ||
             (maximum(j) > (habitatmeta.ncols))
@@ -239,12 +288,12 @@ function read_point_map(V, file, habitatmeta)
         throw("Less than two valid focal nodes found. Please check focal node location file.")
     end
 
-
+    close(f)
     V.(i), V.(j), V.(v)
 end
 
 function read_source_and_ground_maps(T, V, source_file, ground_file, habitatmeta,
-                                        is_res) 
+                                        is_res)
 
     ground_map = Matrix{T}(undef,0,0)
     source_map = Matrix{T}(undef,0,0)
@@ -252,7 +301,7 @@ function read_source_and_ground_maps(T, V, source_file, ground_file, habitatmeta
     f = endswith(ground_file, "gz") ? Gzip.open(ground_file, "r") : open(ground_file, "r")
     filetype = _guess_file_type(ground_file, f)
 
-    if filetype == FILE_TYPE_AAGRID
+    if filetype == FILE_TYPE_AAGRID || filetype == FILE_TYPE_GEOTIFF
         ground_map = read_polymap(T, ground_file, habitatmeta; nodata_as = -1)
         ground_map = map(T, ground_map)
     else
@@ -260,11 +309,12 @@ function read_source_and_ground_maps(T, V, source_file, ground_file, habitatmeta
         ground_map = -9999 * ones(T, habitatmeta.nrows, habitatmeta.ncols)
         ground_map[rc[:,2], rc[:,3]] = rc[:,1]
     end
+    close(f)
 
     f = endswith(source_file, "gz") ? Gzip.open(source_file, "r") : open(source_file, "r")
     filetype = _guess_file_type(source_file, f)
 
-    if filetype == FILE_TYPE_AAGRID
+    if filetype == FILE_TYPE_AAGRID || filetype == FILE_TYPE_GEOTIFF
         source_map = read_polymap(T, source_file, habitatmeta)
         source_map = map(T, source_map)
     else
@@ -272,6 +322,7 @@ function read_source_and_ground_maps(T, V, source_file, ground_file, habitatmeta
         source_map = -9999 * ones(T, habitatmeta.nrows, habitatmeta.ncols)
         source_map[rc[:,2], rc[:,3]] = rc[:,1]
     end
+    close(f)
 
     if is_res
         ind = findall(x -> x == -9999, ground_map)
@@ -334,14 +385,14 @@ function read_included_pairs(V, filename)
                 mat[idx2,idx1] = 1
             end
         end
-        
+
         return IncludeExcludePairs(mode, point_ids, mat)
     end
 
 end
 
 function get_network_data(T, V, cfg)::NetworkData{T,V}
-    
+
     hab_is_res = cfg["habitat_map_is_resistances"] in TRUELIST
     hab_file = cfg["habitat_file"]
     fp_file = cfg["point_file"]
@@ -383,18 +434,18 @@ function load_raster_data(T, V, cfg)::RasData{T,V}
     polygon_file = cfg["polygon_file"]
 
     # Mask file
-    use_mask = cfg["use_mask"] in TRUELIST 
+    use_mask = cfg["use_mask"] in TRUELIST
     mask_file = cfg["mask_file"]
 
     # Point file
     point_file = cfg["point_file"]
 
     # Variable source strengths
-    use_var_source = cfg["use_variable_source_strengths"] in TRUELIST 
+    use_var_source = cfg["use_variable_source_strengths"] in TRUELIST
     var_source_file = cfg["variable_source_file"]
 
     # Included Pairs
-    use_inc_pairs = cfg["use_included_pairs"] in TRUELIST 
+    use_inc_pairs = cfg["use_included_pairs"] in TRUELIST
     inc_pairs_file = cfg["included_pairs_file"]
 
     # Advanced mode
@@ -403,7 +454,7 @@ function load_raster_data(T, V, cfg)::RasData{T,V}
     source_file = cfg["source_file"]
     ground_file = cfg["ground_file"]
     ground_is_res = cfg["ground_file_is_resistances"] in TRUELIST
-    
+
     csinfo("Reading maps")
 
     # Read cell map
@@ -428,12 +479,12 @@ function load_raster_data(T, V, cfg)::RasData{T,V}
     if !is_advanced
         points_rc = read_point_map(V, point_file, hbmeta)
     else
-        points_rc = (V[], V[], V[]) 
+        points_rc = (V[], V[], V[])
     end
 
     # Advanced mode reading
     if is_advanced
-        source_map, ground_map = 
+        source_map, ground_map =
         read_source_and_ground_maps(T, V, source_file, ground_file,
                                     hbmeta, ground_is_res)
     else
@@ -453,7 +504,7 @@ function load_raster_data(T, V, cfg)::RasData{T,V}
     else
         strengths = Matrix{T}(undef, 0,0)
     end
-    
+
     RasData(cellmap, polymap, source_map, ground_map, points_rc, strengths,
                     included_pairs, hbmeta)
 end
